@@ -2,11 +2,45 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, CallbackContext
 import yt_dlp
 import os
+import random
+import datetime
 
 from config import TELEGRAM_TOKEN
 
+SUPPORT_MESSAGE_INTERVAL = datetime.timedelta(days=2)  # Раз в два дня
+LAST_SUPPORT_MESSAGE = None
+
 async def start(update: Update, context: CallbackContext):
     await update.message.reply_text("Привет! Отправь мне ссылку на YouTube, и я помогу скачать видео.")
+
+async def send_support_message(update: Update, context: CallbackContext):
+    global LAST_SUPPORT_MESSAGE
+    now = datetime.datetime.now()
+
+    if LAST_SUPPORT_MESSAGE and now - LAST_SUPPORT_MESSAGE < SUPPORT_MESSAGE_INTERVAL:
+        return  # Если ещё не прошло 2 дня, не отправляем повторно
+
+    LAST_SUPPORT_MESSAGE = now  # Обновляем время последней отправки
+
+    keyboard = [
+        [InlineKeyboardButton("☕ Поддержать автора", url="https://www.donationalerts.com/")],
+        [InlineKeyboardButton("📢 Мои соцсети", url="https://t.me/your_channel")],
+        [InlineKeyboardButton("📩 Оставить отзыв", callback_data="feedback")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "💖 Поддержи проект! Буду рад любой помощи:\n\n"
+        "☕ Чай, кофе и печеньки приветствуются!\n"
+        "📢 Подпишись на мои соцсети\n"
+        "📩 Напиши отзыв о боте",
+        reply_markup=reply_markup
+    )
+
+async def handle_feedback(update: Update, context: CallbackContext):
+    query = update.callback_query
+    await query.answer()
+    await query.message.reply_text("Напиши сюда свои пожелания и жалобы. Я всё читаю, спасибо!")
 
 async def download_video(update: Update, context: CallbackContext):
     url = update.message.text.strip()
@@ -31,9 +65,9 @@ async def download_video(update: Update, context: CallbackContext):
 
         if qualities:
             keyboard = [[InlineKeyboardButton(q, callback_data=q)] for q in sorted(qualities.keys())]
+            keyboard.append([InlineKeyboardButton("🎵 Скачать MP3", callback_data="mp3")])  # <-- Добавляем кнопку MP3
             keyboard.append([InlineKeyboardButton("Отмена", callback_data="cancel")])
             reply_markup = InlineKeyboardMarkup(keyboard)
-
             quality_message = await update.message.reply_text("Выбери качество:", reply_markup=reply_markup)
 
             context.user_data.update({
@@ -61,24 +95,55 @@ async def handle_quality_selection(update: Update, context: CallbackContext):
     url = context.user_data.get('url')
     qualities = context.user_data.get('qualities', {})
     quality_message = context.user_data.pop('quality_message', None)
-    info = context.user_data.get('info')
 
     if quality_message:
         await quality_message.delete()
 
+    # Обработка запроса на MP3
+    if query.data == "mp3":
+        sending_message = await query.message.reply_text("🎶 Качаем аудио в MP3, погоди немного...")
+
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',  # Можно 128, 192, 320
+            }],
+            'outtmpl': '%(title)s.%(ext)s',  # Шаблон имени файла
+            'quiet': True,  # Отключаем спам в консоли
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                file_name = ydl.prepare_filename(info).replace(".webm", ".mp3").replace(".m4a", ".mp3")
+
+            with open(file_name, "rb") as audio_file:
+                await query.message.reply_audio(audio_file)
+
+            os.remove(file_name)  # Удаляем после отправки
+
+        except Exception as e:
+            await query.message.reply_text(f"Ошибка при скачивании MP3: {e}")
+
+        await sending_message.delete()
+        return  # Выходим из функции после обработки MP3
+
+    # Получаем выбранный формат видео
     format_id = qualities.get(query.data)
     if not url or not format_id:
         await query.message.reply_text("Ошибка: не удалось получить информацию о видео.")
         return
 
-    sending_message = await query.message.reply_text("Скидываю видосик, братишка...")
+    sending_message = await query.message.reply_text("📥 Скидываю видосик, погоди чутка...")
 
     try:
         ydl_opts = {
-            'format': f"{format_id}+bestaudio",  # Комбинируем формат с лучшим аудио
-            'merge_output_format': 'mp4',
-            'quiet': True,
+            'format': f"{format_id}+bestaudio",  # Комбинируем видео + лучшее аудио
+            'merge_output_format': 'mp4',  # Конвертация в mp4
             'outtmpl': '%(title)s.%(ext)s',
+            'quiet': True,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
