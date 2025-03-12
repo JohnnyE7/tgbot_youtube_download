@@ -19,3 +19,9 @@ async def test_start_command():
     update.message.reply_text.assert_called_once_with("Йо! Кидай мне ссылку на YouTube, и я помогу тебе скачать что угодно 🎬🔥")
 
 
+@pytest.mark.asyncio
+async def test_register_existing_user():
+    with patch("main.is_user_logged_in", return_value=True):
+        update = AsyncMock()
+        await register(update, None)
+        update.message.reply_text.assert_called_once_with("Ты уже в системе, друг 😎 Вперёд за видосами!")
