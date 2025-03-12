@@ -41,3 +41,13 @@ async def test_login_existing_user():
         update = AsyncMock()
         await login(update, None)
         update.message.reply_text.assert_called_once_with("Ты уже вошёл, красавчик 😏 Жги!")
+
+
+@pytest.mark.asyncio
+async def test_login_new_user():
+    with patch("main.is_user_logged_in", return_value=False):
+        update = AsyncMock()
+        context = AsyncMock()
+        await login(update, context)
+        update.message.reply_text.assert_called_once_with("Введи свой пароль, и я тебя пущу 🚪")
+        assert context.user_data['logging_in']
