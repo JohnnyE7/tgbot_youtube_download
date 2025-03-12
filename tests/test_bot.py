@@ -66,3 +66,13 @@ async def test_download_video_invalid_url():
     update.message.text = "https://example.com"
     await download_video(update, None)
     update.message.reply_text.assert_called_once_with("Хмм... 🤔 Это не похоже на YouTube-ссылку")
+
+@pytest.mark.asyncio
+async def test_handle_quality_selection_cancel():
+    update = AsyncMock()
+    context = AsyncMock()
+    query = AsyncMock()
+    query.data = "cancel"
+    update.callback_query = query
+    await handle_quality_selection(update, context)
+    query.message.reply_text.assert_called_once_with("Отменено!")
