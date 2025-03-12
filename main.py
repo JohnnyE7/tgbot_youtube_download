@@ -1,52 +1,53 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, CallbackContext
 import yt_dlp
-import io
 import os
 
-from config import TELEGRAM_TOKEN, PROXY
+from config import TELEGRAM_TOKEN
 
 async def start(update: Update, context: CallbackContext):
     await update.message.reply_text("Привет! Отправь мне ссылку на YouTube, и я помогу скачать видео.")
 
 async def download_video(update: Update, context: CallbackContext):
-    url = update.message.text
-    if "youtube.com" in url or "youtu.be" in url:
-        try:
-            processing_message = await update.message.reply_text("Переходим по ссылочке, пажжи мальца не кипишуй...")
-
-            ydl_opts = {
-                'noplaylist': True,
-                'format': 'bestvideo+bestaudio',
-            }
-
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-
-            qualities = {}
-            for format in info.get('formats', []):
-                if 'format_note' in format and 'format_id' in format:
-                    note = format['format_note']
-                    format_id = format['format_id']
-                    if note in ['144p', '240p', '360p', '480p', '720p', '1080p']:
-                        qualities[note] = format_id
-
-            await processing_message.delete()
-
-            if qualities:
-                keyboard = [[InlineKeyboardButton(q, callback_data=q)] for q in sorted(qualities.keys())]
-                keyboard.append([InlineKeyboardButton("Отмена", callback_data="cancel")])
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                quality_message = await update.message.reply_text("Выбери качество:", reply_markup=reply_markup)
-                context.user_data['url'] = url
-                context.user_data['qualities'] = qualities
-                context.user_data['quality_message'] = quality_message
-            else:
-                await update.message.reply_text("Не удалось получить доступные качества.")
-        except Exception as e:
-            await update.message.reply_text(f"Ошибка: {e}")
-    else:
+    url = update.message.text.strip()
+    if "youtube.com" not in url and "youtu.be" not in url:
         await update.message.reply_text("Это не похоже на ссылку YouTube.")
+        return
+
+    processing_message = await update.message.reply_text("Переходим по ссылочке, пажжи мальца не кипишуй...")
+
+    try:
+        ydl_opts = {'quiet': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        qualities = {
+            f['format_note']: f['format_id']
+            for f in info.get('formats', [])
+            if 'format_note' in f and 'format_id' in f and f['format_note'] in ['144p', '240p', '360p', '480p', '720p', '1080p']
+        }
+
+        await processing_message.delete()
+
+        if qualities:
+            keyboard = [[InlineKeyboardButton(q, callback_data=q)] for q in sorted(qualities.keys())]
+            keyboard.append([InlineKeyboardButton("Отмена", callback_data="cancel")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            quality_message = await update.message.reply_text("Выбери качество:", reply_markup=reply_markup)
+
+            context.user_data.update({
+                'url': url,
+                'qualities': qualities,
+                'info': info,
+                'quality_message': quality_message
+            })
+        else:
+            await update.message.reply_text("Не удалось получить доступные качества.")
+
+    except Exception as e:
+        await processing_message.delete()
+        await update.message.reply_text(f"Ошибка: {e}")
 
 async def handle_quality_selection(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -57,47 +58,42 @@ async def handle_quality_selection(update: Update, context: CallbackContext):
         await query.message.reply_text("Отменено!")
         return
 
-    quality = query.data
     url = context.user_data.get('url')
     qualities = context.user_data.get('qualities', {})
-    quality_message = context.user_data.get('quality_message')
+    quality_message = context.user_data.pop('quality_message', None)
+    info = context.user_data.get('info')
 
     if quality_message:
         await quality_message.delete()
 
-    if not url or quality not in qualities:
+    format_id = qualities.get(query.data)
+    if not url or not format_id:
         await query.message.reply_text("Ошибка: не удалось получить информацию о видео.")
         return
 
-    format_id = qualities[quality]
-    try:
-        sending_message = await query.message.reply_text("Скидываю видосик, братишка...")
+    sending_message = await query.message.reply_text("Скидываю видосик, братишка...")
 
+    try:
         ydl_opts = {
-            'noplaylist': True,
-            'format': format_id,
-            'socket_timeout': 30,
+            'format': f"{format_id}+bestaudio",  # Комбинируем формат с лучшим аудио
+            'merge_output_format': 'mp4',
+            'quiet': True,
+            'outtmpl': '%(title)s.%(ext)s',
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            file_name = ydl.prepare_filename(info)
+            file_info = ydl.extract_info(url, download=True)
+            file_name = ydl.prepare_filename(file_info)
 
-            with open(file_name, "rb") as video_file:
-                video_data = video_file.read()
+        with open(file_name, "rb") as video_file:
+            await query.message.reply_video(video_file)
 
-            video_stream = io.BytesIO(video_data)
-            video_stream.name = file_name
-
-        await sending_message.delete()
-        await query.message.reply_video(video_stream)
-        video_stream.close()
-
-        if os.path.exists(file_name):
-            os.remove(file_name)
+        os.remove(file_name)  # Удаляем файл после отправки
 
     except Exception as e:
         await query.message.reply_text(f"Ошибка: {e}")
+
+    await sending_message.delete()
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
