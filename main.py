@@ -2,13 +2,19 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, CallbackContext
 import yt_dlp
 import os
-import random
 import datetime
+import time
 
 from config import TELEGRAM_TOKEN
 
+# Для сообщений поддержки
 SUPPORT_MESSAGE_INTERVAL = datetime.timedelta(days=2)  # Раз в два дня
 LAST_SUPPORT_MESSAGE = None
+
+# Настройки антидудоса
+MAX_REQUESTS = 3  # Максимальное количество запросов за...
+TIME_WINDOW = 60   # ... это количество секунд
+QUALITY_TIMEOUT = 180  # Через сколько секунд удалять сообщение с выбором качества
 
 async def start(update: Update, context: CallbackContext):
     await update.message.reply_text("Привет! Отправь мне ссылку на YouTube, и я помогу скачать видео.")
@@ -23,13 +29,16 @@ async def send_support_message(update: Update, context: CallbackContext):
     LAST_SUPPORT_MESSAGE = now  # Обновляем время последней отправки
 
     keyboard = [
-        [InlineKeyboardButton("☕ Поддержать автора", url="https://www.donationalerts.com/")],
-        [InlineKeyboardButton("📢 Мои соцсети", url="https://t.me/your_channel")],
+        [InlineKeyboardButton("☕ Поддержать автора", url="https://www.tbank.ru/cf/7Bl1tQ07Aw6")],
+        [InlineKeyboardButton("📢 Мои соцсети", url="https://t.me/JohnnySvnt")],
         [InlineKeyboardButton("📩 Оставить отзыв", callback_data="feedback")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
+    # Проверяем, откуда вызвана функция
+    message = update.message if update.message else update.callback_query.message
+
+    await message.reply_text(
         "💖 Поддержи проект! Буду рад любой помощи:\n\n"
         "☕ Чай, кофе и печеньки приветствуются!\n"
         "📢 Подпишись на мои соцсети\n"
@@ -41,6 +50,23 @@ async def handle_feedback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
     await query.message.reply_text("Напиши сюда свои пожелания и жалобы. Я всё читаю, спасибо!")
+
+async def delete_old_quality_messages(update: Update, context: CallbackContext):
+    """Удаляет сообщения с кнопками выбора качества, если они устарели."""
+    now = time.time()
+    messages = context.user_data.get('quality_messages', [])
+    new_messages = []
+
+    for message, timestamp in messages:
+        if now - timestamp >= QUALITY_TIMEOUT:
+            try:
+                await message.delete()
+            except:
+                pass  # Если сообщение уже удалено, просто пропускаем
+        else:
+            new_messages.append((message, timestamp))  # Оставляем актуальные
+
+    context.user_data['quality_messages'] = new_messages
 
 async def download_video(update: Update, context: CallbackContext):
     url = update.message.text.strip()
@@ -99,7 +125,6 @@ async def handle_quality_selection(update: Update, context: CallbackContext):
     if quality_message:
         await quality_message.delete()
 
-    # Обработка запроса на MP3
     if query.data == "mp3":
         sending_message = await query.message.reply_text("🎶 Качаем аудио в MP3, погоди немного...")
 
@@ -108,10 +133,10 @@ async def handle_quality_selection(update: Update, context: CallbackContext):
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
-                'preferredquality': '192',  # Можно 128, 192, 320
+                'preferredquality': '192',
             }],
-            'outtmpl': '%(title)s.%(ext)s',  # Шаблон имени файла
-            'quiet': True,  # Отключаем спам в консоли
+            'outtmpl': '%(title)s.%(ext)s',
+            'quiet': True,
         }
 
         try:
@@ -122,15 +147,15 @@ async def handle_quality_selection(update: Update, context: CallbackContext):
             with open(file_name, "rb") as audio_file:
                 await query.message.reply_audio(audio_file)
 
-            os.remove(file_name)  # Удаляем после отправки
+            os.remove(file_name)
 
         except Exception as e:
             await query.message.reply_text(f"Ошибка при скачивании MP3: {e}")
 
         await sending_message.delete()
-        return  # Выходим из функции после обработки MP3
+        await send_support_message(update, context)  # Отправляем кнопки поддержки
+        return
 
-    # Получаем выбранный формат видео
     format_id = qualities.get(query.data)
     if not url or not format_id:
         await query.message.reply_text("Ошибка: не удалось получить информацию о видео.")
@@ -140,8 +165,8 @@ async def handle_quality_selection(update: Update, context: CallbackContext):
 
     try:
         ydl_opts = {
-            'format': f"{format_id}+bestaudio",  # Комбинируем видео + лучшее аудио
-            'merge_output_format': 'mp4',  # Конвертация в mp4
+            'format': f"{format_id}+bestaudio",
+            'merge_output_format': 'mp4',
             'outtmpl': '%(title)s.%(ext)s',
             'quiet': True,
         }
@@ -153,12 +178,13 @@ async def handle_quality_selection(update: Update, context: CallbackContext):
         with open(file_name, "rb") as video_file:
             await query.message.reply_video(video_file)
 
-        os.remove(file_name)  # Удаляем файл после отправки
+        os.remove(file_name)
 
     except Exception as e:
         await query.message.reply_text(f"Ошибка: {e}")
 
     await sending_message.delete()
+    await send_support_message(update, context)  # Отправляем кнопки поддержки
 
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
