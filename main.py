@@ -3,30 +3,105 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 import yt_dlp
 import os
 import datetime
-import time
+import mysql.connector
 
-from config import TELEGRAM_TOKEN
+from config import TELEGRAM_TOKEN, DB_HOST, DB_USER, DB_PASSWORD, DB_NAME
 
-# Для сообщений поддержки
-SUPPORT_MESSAGE_INTERVAL = datetime.timedelta(days=2)  # Раз в два дня
+
+MAX_REQUESTS = 3
+TIME_WINDOW = 60
+QUALITY_TIMEOUT = 180
+
+
+SUPPORT_MESSAGE_INTERVAL = datetime.timedelta(days=2)
 LAST_SUPPORT_MESSAGE = None
 
-# Настройки антидудоса
-MAX_REQUESTS = 3  # Максимальное количество запросов за...
-TIME_WINDOW = 60   # ... это количество секунд
-QUALITY_TIMEOUT = 180  # Через сколько секунд удалять сообщение с выбором качества
+
+def get_db_connection():
+    return mysql.connector.connect(
+        host=DB_HOST,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME
+    )
+
+
+def is_user_logged_in(user_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM users WHERE telegram_id = %s", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+
+async def register(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    if is_user_logged_in(user_id):
+        await update.message.reply_text("Ты уже в системе, друг 😎 Вперёд за видосами!")
+        return
+
+    await update.message.reply_text("Придумай пароль и отправь мне 🔒")
+    context.user_data['registering'] = True
+
+
+async def login(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    if is_user_logged_in(user_id):
+        await update.message.reply_text("Ты уже вошёл, красавчик 😏 Жги!")
+        return
+
+    await update.message.reply_text("Введи свой пароль, и я тебя пущу 🚪")
+    context.user_data['logging_in'] = True
+
+
+async def handle_text(update: Update, context: CallbackContext):
+    user_id = update.message.from_user.id
+    text = update.message.text.strip()
+
+    if context.user_data.get('registering'):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO users (telegram_id, password) VALUES (%s, %s)", (user_id, text))
+        conn.commit()
+        conn.close()
+        context.user_data.pop('registering', None)
+        await update.message.reply_text("Ты в игре! Теперь залогинься с помощью /login 🔑")
+        return
+
+    if context.user_data.get('logging_in'):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM users WHERE telegram_id = %s AND password = %s", (user_id, text))
+        result = cursor.fetchone()
+        conn.close()
+        if result:
+            context.user_data.pop('logging_in', None)
+            await update.message.reply_text("Добро пожаловать! Ты теперь в клубе 🎉")
+        else:
+            await update.message.reply_text("Упс, пароль не тот 🤔 Попробуй ещё раз")
+        return
+
+    if not is_user_logged_in(user_id):
+        await update.message.reply_text("Эй, а ты кто? 🤨 Залогинься командой /login или зарегайся через /register")
+        return
+
+    await download_video(update, context)
+
 
 async def start(update: Update, context: CallbackContext):
-    await update.message.reply_text("Привет! Отправь мне ссылку на YouTube, и я помогу скачать видео.")
+    await update.message.reply_text("Йо! Кидай мне ссылку на YouTube, и я помогу тебе скачать что угодно 🎬🔥")
+
+
 
 async def send_support_message(update: Update, context: CallbackContext):
     global LAST_SUPPORT_MESSAGE
     now = datetime.datetime.now()
 
     if LAST_SUPPORT_MESSAGE and now - LAST_SUPPORT_MESSAGE < SUPPORT_MESSAGE_INTERVAL:
-        return  # Если ещё не прошло 2 дня, не отправляем повторно
+        return
 
-    LAST_SUPPORT_MESSAGE = now  # Обновляем время последней отправки
+    LAST_SUPPORT_MESSAGE = now
 
     keyboard = [
         [InlineKeyboardButton("☕ Поддержать автора", url="https://www.tbank.ru/cf/7Bl1tQ07Aw6")],
@@ -35,46 +110,30 @@ async def send_support_message(update: Update, context: CallbackContext):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Проверяем, откуда вызвана функция
     message = update.message if update.message else update.callback_query.message
 
     await message.reply_text(
-        "💖 Поддержи проект! Буду рад любой помощи:\n\n"
-        "☕ Чай, кофе и печеньки приветствуются!\n"
-        "📢 Подпишись на мои соцсети\n"
-        "📩 Напиши отзыв о боте",
+        "🔥 Поддержи проект! Буду рад любой помощи 💖\n\n"
+        "☕ Чай, кофе, печеньки – всё в дело!\n"
+        "📢 Подпишись, будь на связи\n"
+        "📩 Оставь фидбэк, это важно!",
         reply_markup=reply_markup
     )
+
 
 async def handle_feedback(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
-    await query.message.reply_text("Напиши сюда свои пожелания и жалобы. Я всё читаю, спасибо!")
+    await query.message.reply_text("Напиши сюда свои мысли и пожелания, я всё читаю! Спасибо 🤗")
 
-async def delete_old_quality_messages(update: Update, context: CallbackContext):
-    """Удаляет сообщения с кнопками выбора качества, если они устарели."""
-    now = time.time()
-    messages = context.user_data.get('quality_messages', [])
-    new_messages = []
-
-    for message, timestamp in messages:
-        if now - timestamp >= QUALITY_TIMEOUT:
-            try:
-                await message.delete()
-            except:
-                pass  # Если сообщение уже удалено, просто пропускаем
-        else:
-            new_messages.append((message, timestamp))  # Оставляем актуальные
-
-    context.user_data['quality_messages'] = new_messages
 
 async def download_video(update: Update, context: CallbackContext):
     url = update.message.text.strip()
     if "youtube.com" not in url and "youtu.be" not in url:
-        await update.message.reply_text("Это не похоже на ссылку YouTube.")
+        await update.message.reply_text("Хмм... 🤔 Это не похоже на YouTube-ссылку")
         return
 
-    processing_message = await update.message.reply_text("Переходим по ссылочке, пажжи мальца не кипишуй...")
+    processing_message = await update.message.reply_text("Дай мне пару секунд, сейчас замучу видос 🎥⚡")
 
     try:
         ydl_opts = {'quiet': True}
@@ -91,10 +150,10 @@ async def download_video(update: Update, context: CallbackContext):
 
         if qualities:
             keyboard = [[InlineKeyboardButton(q, callback_data=q)] for q in sorted(qualities.keys())]
-            keyboard.append([InlineKeyboardButton("🎵 Скачать MP3", callback_data="mp3")])  # <-- Добавляем кнопку MP3
-            keyboard.append([InlineKeyboardButton("Отмена", callback_data="cancel")])
+            keyboard.append([InlineKeyboardButton("🎵 MP3", callback_data="mp3")])
+            keyboard.append([InlineKeyboardButton("🚫 Отмена", callback_data="cancel")])
             reply_markup = InlineKeyboardMarkup(keyboard)
-            quality_message = await update.message.reply_text("Выбери качество:", reply_markup=reply_markup)
+            quality_message = await update.message.reply_text("Выбери качество 🎬", reply_markup=reply_markup)
 
             context.user_data.update({
                 'url': url,
@@ -103,11 +162,12 @@ async def download_video(update: Update, context: CallbackContext):
                 'quality_message': quality_message
             })
         else:
-            await update.message.reply_text("Не удалось получить доступные качества.")
+            await update.message.reply_text("Упс! Качество не найдено 😕")
 
     except Exception as e:
         await processing_message.delete()
-        await update.message.reply_text(f"Ошибка: {e}")
+        await update.message.reply_text(f"Ой, ошибочка вышла: {e} 😢")
+
 
 async def handle_quality_selection(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -186,12 +246,16 @@ async def handle_quality_selection(update: Update, context: CallbackContext):
     await sending_message.delete()
     await send_support_message(update, context)  # Отправляем кнопки поддержки
 
+
 def main():
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
+    application.add_handler(CommandHandler("register", register))
+    application.add_handler(CommandHandler("login", login))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_handler(CallbackQueryHandler(handle_quality_selection))
     application.run_polling()
+
 
 if __name__ == '__main__':
     main()
