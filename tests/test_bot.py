@@ -59,3 +59,10 @@ async def test_handle_text_not_logged_in():
         context = AsyncMock()
         await handle_text(update, context)
         update.message.reply_text.assert_called_once_with("Эй, а ты кто? 🤨 Залогинься командой /login или зарегайся через /register")
+
+@pytest.mark.asyncio
+async def test_download_video_invalid_url():
+    update = AsyncMock()
+    update.message.text = "https://example.com"
+    await download_video(update, None)
+    update.message.reply_text.assert_called_once_with("Хмм... 🤔 Это не похоже на YouTube-ссылку")
