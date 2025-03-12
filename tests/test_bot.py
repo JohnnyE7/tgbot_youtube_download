@@ -25,3 +25,12 @@ async def test_register_existing_user():
         update = AsyncMock()
         await register(update, None)
         update.message.reply_text.assert_called_once_with("Ты уже в системе, друг 😎 Вперёд за видосами!")
+
+@pytest.mark.asyncio
+async def test_register_new_user():
+    with patch("main.is_user_logged_in", return_value=False):
+        update = AsyncMock()
+        context = AsyncMock()
+        await register(update, context)
+        update.message.reply_text.assert_called_once_with("Придумай пароль и отправь мне 🔒")
+        assert context.user_data['registering']
